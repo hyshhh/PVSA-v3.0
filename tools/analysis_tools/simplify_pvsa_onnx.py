@@ -46,11 +46,23 @@ def main():
                          '再重新运行。')
 
     import onnx
+    from onnx import helper
     model = onnx.load(args.onnx)
     cnt = Counter(n.op_type for n in model.graph.node)
     print('简化前节点数:', sum(cnt.values()))
     print('简化前 PVSA_TopP_Route:', cnt.get('PVSA_TopP_Route', 0),
           ' PVSA_TopP_Flash:', cnt.get('PVSA_TopP_Flash', 0))
+
+    # onnxsim 的 C++ shape inference 不认识空 domain 的自定义节点，会报
+    # "No Op registered"。简化前临时把 PVSA_TopP_* 移到自定义 domain
+    # pvsa.custom（ONNX 规范允许未注册的自定义域，推断会跳过），简化完
+    # 再恢复为空 domain，保持与 TensorRT 插件（空 namespace）匹配。
+    custom_domain = 'pvsa.custom'
+    for node in model.graph.node:
+        if node.op_type in ('PVSA_TopP_Route', 'PVSA_TopP_Flash'):
+            node.domain = custom_domain
+    if custom_domain not in {o.domain for o in model.opset_import}:
+        model.opset_import.append(helper.make_opsetid(custom_domain, 1))
 
     if args.output is None:
         root, ext = os.path.splitext(args.onnx)
@@ -63,6 +75,14 @@ def main():
         check_n=args.check_n,
     )
     print(f'简化耗时: {time.time() - t0:.1f}s，验证通过: {check_ok}')
+
+    for node in model_sim.graph.node:
+        if (node.op_type in ('PVSA_TopP_Route', 'PVSA_TopP_Flash')
+                and node.domain == custom_domain):
+            node.domain = ''
+    model_sim.opset_import[:] = [
+        o for o in model_sim.opset_import if o.domain != custom_domain
+    ]
 
     cnt_sim = Counter(n.op_type for n in model_sim.graph.node)
     print('简化后节点数:', sum(cnt_sim.values()))
