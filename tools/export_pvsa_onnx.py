@@ -33,7 +33,6 @@ from mmengine.runner import load_checkpoint
 from mmseg.registry import MODELS
 from mmseg.utils import register_all_modules
 
-import mmseg.models.utils.top_p_bra as _tpb
 
 
 # ============================================================
@@ -43,7 +42,7 @@ import mmseg.models.utils.top_p_bra as _tpb
 # ============================================================
 
 def _patch_symbolic_export():
-    original_route = _tpb.topp_route_cuda
+    import mmseg.models.utils.top_p_bra as _tpb
     original_flash = _tpb.topp_flash_attention
 
     class PVSARouteExport(torch.autograd.Function):
@@ -162,33 +161,54 @@ class MMSegONNXWrapper(nn.Module):
 
 
 def _setup_cuda_env():
-    """保证 torch.utils.cpp_extension 能找到有效的 nvcc / CUDA_HOME。
+    """保证 torch.utils.cpp_extension 使用有效的 CUDA_HOME / nvcc。
 
-    JIT 编译 PVSA CUDA 扩展时会用 CUDA_HOME/bin/nvcc，若 CUDA_HOME
-    指向不存在的目录（如 /usr/local/cuda-12.0）会直接报 nvcc not found。
-    这里自动解析真实可用的 nvcc 并覆盖 CUDA_HOME / CUDACXX。
+    torch 的 cpp_extension 在首次 import 时会缓存 CUDA_HOME（模块变量），
+    仅改 os.environ 不生效，必须同时覆盖 torch.utils.cpp_extension.CUDA_HOME。
+    否则 JIT 编译扩展时仍会用失效路径（如 /usr/local/cuda-12.0/bin/nvcc）。
     """
+    import glob
     import shutil
-    nvcc = shutil.which("nvcc")
-    if nvcc is None:
-        for cand in ("/usr/bin/nvcc", "/usr/local/cuda/bin/nvcc",
-                     "/usr/local/cuda-12.0/bin/nvcc",
-                     "/usr/local/cuda-11.8/bin/nvcc"):
-            if os.path.exists(cand):
-                nvcc = cand
+
+    nvcc_candidates = []
+    found = shutil.which("nvcc")
+    if found and os.path.exists(found):
+        nvcc_candidates.append(os.path.realpath(found))
+    for cand in ("/usr/bin/nvcc", "/usr/local/cuda/bin/nvcc"):
+        if cand not in nvcc_candidates and os.path.exists(cand):
+            nvcc_candidates.append(os.path.realpath(cand))
+
+    cuda_home = None
+    for nvcc in nvcc_candidates:
+        home = os.path.dirname(os.path.dirname(nvcc))
+        if os.path.exists(os.path.join(home, "include", "cuda_runtime.h")):
+            cuda_home = home
+            break
+
+    if cuda_home is None:
+        for home in ["/usr/local/cuda"] + sorted(glob.glob("/usr/local/cuda-*"),
+                                                 reverse=True):
+            if (os.path.exists(os.path.join(home, "bin", "nvcc")) and
+                    os.path.exists(os.path.join(home, "include",
+                                               "cuda_runtime.h"))):
+                cuda_home = home
                 break
-    if nvcc is None:
-        print("警告: 未找到 nvcc，请先安装 CUDA 工具链或设置 CUDA_HOME。")
+
+    if cuda_home is None:
+        print("警告: 未找到有效 CUDA_HOME（缺少 include/cuda_runtime.h），请手动设置 CUDA_HOME 后重试。")
         return
-    real_nvcc = os.path.realpath(nvcc)
-    cuda_home = os.path.dirname(os.path.dirname(real_nvcc))
-    if os.path.exists(os.path.join(cuda_home, "bin", "nvcc")):
-        os.environ["CUDA_HOME"] = cuda_home
-        os.environ["CUDACXX"] = os.path.join(cuda_home, "bin", "nvcc")
-    else:
-        os.environ["CUDACXX"] = real_nvcc
+
+    os.environ["CUDA_HOME"] = cuda_home
+    os.environ["CUDACXX"] = os.path.join(cuda_home, "bin", "nvcc")
+    # 关键：覆盖 torch 已缓存的 CUDA_HOME 模块变量
+    try:
+        import torch.utils.cpp_extension as _cpp_ext
+        _cpp_ext.CUDA_HOME = cuda_home
+    except Exception:
+        pass
     os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "8.6")
-    print('CUDA_HOME=' + str(os.environ.get('CUDA_HOME')) + ', nvcc=' + str(os.environ.get('CUDACXX')))
+    print('CUDA_HOME=' + cuda_home)
+
 def main():
     parser = argparse.ArgumentParser(
         description='导出完整 PVSA 固定形状 ONNX（含自定义节点）')
