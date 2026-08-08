@@ -289,33 +289,63 @@ def main():
         _ = wrapper(dummy_input)
 
     os.makedirs(os.path.dirname(args.onnx) or '.', exist_ok=True)
-    with torch.no_grad():
-        torch.onnx.export(
-            wrapper,
-            dummy_input,
-            args.onnx,
-            input_names=['input'],
-            output_names=['logits'],
-            opset_version=args.opset,
-            do_constant_folding=True,
-        )
 
-    # 结构校验 + 确认自定义节点存在
+    # torch 2.0.1 的 torch.onnx.export 导出后会调用 C++ 侧 _C._check_onnx_proto
+    # 做 ONNX schema 校验；PVSA_TopP_* 是自定义节点，不在 opset 官方注册表内，
+    # 必然报 "No Op registered ..."。导出期间临时把该校验替换为空操作，结束后
+    # 立即恢复。节点保持默认空 domain，与 TensorRT 插件（空 namespace）匹配。
+    import torch._C as _C
+    export_kwargs = dict(
+        input_names=['input'],
+        output_names=['logits'],
+        opset_version=args.opset,
+        do_constant_folding=True,
+    )
+    patched = False
+    try:
+        original_check_onnx_proto = _C._check_onnx_proto
+        _C._check_onnx_proto = lambda proto: None
+        patched = True
+    except (AttributeError, TypeError):
+        # 个别 torch 版本不允许替换 C 扩展属性，退回 ONNX_FALLTHROUGH
+        # 导出类型（同样跳过内置 proto 校验）。
+        export_kwargs['operator_export_type'] = \
+            torch.onnx.OperatorExportTypes.ONNX_FALLTHROUGH
+    try:
+        with torch.no_grad():
+            torch.onnx.export(
+                wrapper,
+                dummy_input,
+                args.onnx,
+                **export_kwargs,
+            )
+    finally:
+        if patched:
+            _C._check_onnx_proto = original_check_onnx_proto
+
+    # 结构解析 + 确认自定义节点存在。
+    # 自定义节点不在 ONNX 官方算子集，onnx.checker.check_model 同样会报
+    # "No Op registered"，这里改用宽松检查：解析图 + 统计自定义节点，
+    # 并确认没有意外残留的 aten fallback 节点（TensorRT 无法解析）。
     import onnx
     onnx_model = onnx.load(args.onnx)
-    onnx.checker.check_model(onnx_model)
 
     n_route = sum(1 for node in onnx_model.graph.node
                   if node.op_type == 'PVSA_TopP_Route')
     n_flash = sum(1 for node in onnx_model.graph.node
                   if node.op_type == 'PVSA_TopP_Flash')
-    print(f'ONNX 结构校验通过: {args.onnx}')
+    n_aten = sum(1 for node in onnx_model.graph.node
+                 if node.domain == 'org.pytorch.aten')
+    print(f'ONNX 结构解析完成: {args.onnx}')
     print(f'输入形状: {input_shape}')
     print(f'PVSA_TopP_Route 节点数: {n_route}')
     print(f'PVSA_TopP_Flash 节点数: {n_flash}')
     if n_route == 0 or n_flash == 0:
         raise RuntimeError('导出结果缺少 PVSA 自定义节点，请确认 '
                            'topp_flash_backend=cuda 且 CUDA 扩展可用。')
+    if n_aten:
+        raise RuntimeError('导出结果包含 org.pytorch.aten fallback 节点，'
+                           'TensorRT 无法解析，请检查未支持的算子。')
 
 
 if __name__ == '__main__':

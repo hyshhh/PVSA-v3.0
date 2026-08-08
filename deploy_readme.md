@@ -253,7 +253,7 @@ PVSA_TopP_Flash
 
 仓库已提供导出脚本 `tools/export_pvsa_onnx.py`，它把 PyTorch 推理路径里的两个自定义 CUDA 算子（`topp_route_cuda` / `topp_flash_attention`）通过 ONNX symbolic 映射导出为同名插件节点。导出时需要 GPU 且 PVSA CUDA 扩展可用（即 `topp_flash_backend=cuda` 能正常推理），否则不会生成自定义节点。
 
-运行前先安装 `onnx` 包（导出与结构校验都需要）：
+运行前先安装 `onnx` 包（导出与结构解析都需要）：
 
 ```bash
 pip install onnx
@@ -286,10 +286,17 @@ python tools/export_pvsa_onnx.py \
 导出成功后日志会显示：
 
 ```text
-ONNX 结构校验通过: work_dirs/pvsa_full.onnx
+ONNX 结构解析完成: work_dirs/pvsa_full.onnx
 PVSA_TopP_Route 节点数: ...
 PVSA_TopP_Flash 节点数: ...
 ```
+
+> 说明：`PVSA_TopP_Route` / `PVSA_TopP_Flash` 是自定义节点，不在 ONNX
+> 官方算子集内。torch 内置的 proto 校验和 `onnx.checker` 都会因
+> "No Op registered" 报错，这是预期行为；导出脚本会临时跳过 torch 的
+> 内置校验，并改用节点统计的宽松结构检查（同时确认没有残留
+> `org.pytorch.aten` fallback 节点）。自定义节点保持空 domain，与
+> TensorRT 插件（空 namespace）匹配。
 
 固定输入尺寸的 ONNX 不需要额外设置动态形状；动态输入必须补充对应的形状配置。首次部署建议使用 FP32，验证数值一致性后再增加 `--fp16`。
 ### 10.2 构建完整 TensorRT 引擎
