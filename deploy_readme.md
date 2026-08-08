@@ -34,48 +34,7 @@ ldd "$CUDNN_ROOT/libcudnn.so.8" | grep "not found"
 
 如果路径不同，按 `find` 的结果修改 `CUDNN_ROOT`；找不到 `libcudnn.so.8` 时先安装 cuDNN 8。
 
-## 3. 卸载 CUDA 13 TensorRT
-
-只卸载已安装的 TensorRT 相关软件包，不要使用不存在的 `libnvparsers*` 软件包名：
-
-```bash
-dpkg-query -W -f='${binary:Package} ${db:Status-Status}\n' | awk '$2=="installed" && $1 ~ /^(tensorrt|libnvinfer|libnvonnxparsers|python3-libnvinfer)/ {print $1}' | xargs -r sudo apt-get purge -y
-sudo apt-get autoremove -y
-sudo ldconfig
-```
-
-## 4. 下载并解压 CUDA 12.0 对应的 TensorRT
-
-TensorRT 压缩包需要从 NVIDIA 官方页面下载。登录后下载：
-
-```text
-TensorRT-8.6.1.6.Linux.x86_64-gnu.cuda-12.0.tar.gz
-```
-
-如果下载链接可直接访问：
-
-```bash
-wget -O /tmp/TensorRT-8.6.1.6.Linux.x86_64-gnu.cuda-12.0.tar.gz "https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/secure/8.6.1/tars/TensorRT-8.6.1.6.Linux.x86_64-gnu.cuda-12.0.tar.gz" && mkdir -p "$HOME/opt" && tar -xzf /tmp/TensorRT-8.6.1.6.Linux.x86_64-gnu.cuda-12.0.tar.gz -C "$HOME/opt"
-```
-
-如果 `wget` 返回 `403`，请在浏览器下载后执行：
-
-```bash
-mkdir -p "$HOME/opt"
-tar -xzf ~/Downloads/TensorRT-8.6.1.6.Linux.x86_64-gnu.cuda-12.0.tar.gz -C "$HOME/opt"
-```
-
-检查 TensorRT 文件：
-
-```bash
-ls -lh "$TRT_ROOT/include/NvInfer.h"
-ls -lh "$TRT_ROOT/lib/libnvinfer.so"
-ls -lh "$TRT_ROOT/bin/trtexec"
-```
-
-## 5. 编译普通版
-
-普通版不启用快速数学，用于先验证数值一致性。
+## 3. 编译普通版插件
 
 ```bash
 rm -rf build/tensorrt
@@ -91,14 +50,7 @@ cmake -S deploy/tensorrt \
 cmake --build build/tensorrt -j$(nproc)
 ```
 
-产物：
-
-```bash
-ls -lh build/tensorrt/libpvsa_tensorrt_plugins.so
-ls -lh build/tensorrt/pvsa_build_plugin_engine
-```
-
-## 6. 编译快速版
+## 4. 编译快速版插件
 
 ```bash
 rm -rf build/tensorrt_fast
@@ -115,14 +67,7 @@ cmake -S deploy/tensorrt \
 cmake --build build/tensorrt_fast -j$(nproc)
 ```
 
-产物：
-
-```bash
-ls -lh build/tensorrt_fast/libpvsa_tensorrt_plugins.so
-ls -lh build/tensorrt_fast/pvsa_build_plugin_engine
-```
-
-## 7. 构建插件测试引擎
+## 5. 构建插件测试引擎
 
 `86` 对应 RTX A6000。GPU 2 当前负载较高，优先使用 GPU 1：
 
@@ -158,7 +103,7 @@ build/tensorrt_fast/pvsa_build_plugin_engine \
   --topk 8
 ```
 
-## 8. 使用 `trtexec` 测试
+## 6. 使用 `trtexec` 测试插件引擎
 
 普通版：
 
@@ -186,89 +131,33 @@ CUDA_VISIBLE_DEVICES=1 \
   --iterations=1000
 ```
 
-运行包含自定义插件的引擎时，必须通过 `--plugins` 显式加载插件动态库：
+## 7. 完整 PVSA TensorRT 框架测速
+
+完整部署流程：完整 PVSA 模型 -> 固定形状 ONNX（含 PVSA 自定义节点）-> TensorRT 完整引擎 -> trtexec 测速
+
+### 7.1 导出完整 ONNX
+
+先安装依赖（用 `python -m pip`，避免系统 Python 的 PEP 668 限制）：
 
 ```bash
---plugins="$PWD/build/tensorrt/libpvsa_tensorrt_plugins.so"
+python -m pip install onnx
+python -m pip install onnxsim
 ```
 
-否则 `trtexec` 反序列化引擎时找不到 `PVSA_TopP_Route` 和 `PVSA_TopP_Flash`。
-
-## 9. 插件接口与限制
-
-```text
-PVSA_TopP_Route
-输入：query [N,49,qk_dim]、key [N,49,qk_dim]
-输出：route_weight、route_idx、keep_len
-
-PVSA_TopP_Flash
-输入：q_pix、kv_pix、route_weight、route_idx、keep_len
-输出：attention_output [N,H,W,dim]
-```
-
-```text
-数据类型：FP32
-n_win：7
-p2：49
-head_dim：32
-num_heads：2、4、8、16
-qk_dim == dim
-H、W：必须能被 7 整除
-topk：1 到 49
-```
-
-TensorRT 反序列化引擎前必须加载：
-
-```text
-$TRT_ROOT/lib/libnvinfer.so
-build/tensorrt/libpvsa_tensorrt_plugins.so
-```
-
-插件源码：
-
-```text
-deploy/tensorrt/include/
-deploy/tensorrt/src/
-deploy/tensorrt/tools/build_plugin_engine.cpp
-deploy/tensorrt/CMakeLists.txt
-```
-
-
-## 10. 完整 PVSA TensorRT 框架测速
-
-完整部署的正确流程是：
-
-```text
-完整 PVSA 模型 -> 固定形状 ONNX（含 PVSA 自定义节点）-> TensorRT 完整引擎 -> trtexec 测速
-```
-
-完整引擎需要包含主干、PVSA 模块、输出投影和解码头，并且 ONNX 中的 PVSA 自定义节点必须映射到：
-
-```text
-PVSA_TopP_Route
-PVSA_TopP_Flash
-```
-
-### 10.1 导出完整 ONNX
-
-仓库已提供导出脚本 `tools/export_pvsa_onnx.py`，它把 PyTorch 推理路径里的两个自定义 CUDA 算子（`topp_route_cuda` / `topp_flash_attention`）通过 ONNX symbolic 映射导出为同名插件节点。导出时需要 GPU 且 PVSA CUDA 扩展可用（即 `topp_flash_backend=cuda` 能正常推理），否则不会生成自定义节点。
-
-运行前先安装 `onnx` 包（导出与结构解析都需要）：
-
-```bash
-pip install onnx
-```
-
-默认不加载权重，模型随机初始化导出（`--checkpoint` 传 `0` 或省略均表示随机初始化）：
+导出 512 与 256 固定形状 ONNX（`--checkpoint 0` 表示随机初始化，不加载权重）：
 
 ```bash
 export PYTHONPATH=$PWD:$PYTHONPATH
-
 python tools/export_pvsa_onnx.py \
   --config configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
   --checkpoint 0 \
   --onnx work_dirs/pvsa_full.onnx \
   --input-size 1 3 512 512
+python tools/export_pvsa_onnx.py \
+  --config configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+  --checkpoint 0 \
+  --onnx work_dirs/pvsa_full_256.onnx \
+  --input-size 1 3 256 256
 ```
 
 如需加载训练好的权重，把 `--checkpoint` 换成权重路径即可：
@@ -281,29 +170,28 @@ python tools/export_pvsa_onnx.py \
   --input-size 1 3 512 512
 ```
 
-`--checkpoint` 传 `0` 或省略时跳过 `load_checkpoint`，模型参数保持随机初始化。
+### 7.2 简化 ONNX（强烈建议）
 
-导出成功后日志会显示：
-
-```text
-ONNX 结构解析完成: work_dirs/pvsa_full.onnx
-PVSA_TopP_Route 节点数: ...
-PVSA_TopP_Flash 节点数: ...
-```
-
-> 说明：`PVSA_TopP_Route` / `PVSA_TopP_Flash` 是自定义节点，不在 ONNX
-> 官方算子集内。torch 内置的 proto 校验和 `onnx.checker` 都会因
-> "No Op registered" 报错，这是预期行为；导出脚本会临时跳过 torch 的
-> 内置校验，并改用节点统计的宽松结构检查（同时确认没有残留
-> `org.pytorch.aten` fallback 节点）。自定义节点保持空 domain，与
-> TensorRT 插件（空 namespace）匹配。
-
-固定输入尺寸的 ONNX 不需要额外设置动态形状；动态输入必须补充对应的形状配置。首次部署建议使用 FP32，验证数值一致性后再增加 `--fp16`。
-### 10.2 构建完整 TensorRT 引擎
+完整导出的 ONNX 含有数千个动态形状辅助算子（Shape/Gather/Unsqueeze 等），
+进入 TensorRT 后会变成真实 GPU 层并阻止层融合，导致引擎明显慢于 PyTorch。
+先用 onnxsim 折叠这些算子，再用简化后的 ONNX 构建引擎：
 
 ```bash
-export FULL_ONNX=work_dirs/pvsa_full.onnx
-export FULL_ENGINE=work_dirs/pvsa_full.engine
+cd /media/ddc/新加卷/hys/hysnew3/PVSA/PVSA-v3.0 && git pull
+
+python tools/analysis_tools/simplify_pvsa_onnx.py work_dirs/pvsa_full.onnx \
+  --output work_dirs/pvsa_full_sim.onnx \
+  --input-shape 1 3 512 512
+python tools/analysis_tools/simplify_pvsa_onnx.py work_dirs/pvsa_full_256.onnx \
+  --output work_dirs/pvsa_full_256_sim.onnx \
+  --input-shape 1 3 256 256
+```
+
+### 7.3 构建完整 TensorRT 引擎
+
+```bash
+export FULL_ONNX=work_dirs/pvsa_full_256_sim.onnx
+export FULL_ENGINE=work_dirs/pvsa_full_256.engine
 
 CUDA_VISIBLE_DEVICES=1 \
 "$TRT_ROOT/bin/trtexec" \
@@ -313,11 +201,11 @@ CUDA_VISIBLE_DEVICES=1 \
   --verbose
 ```
 
-确认日志包含插件加载成功且引擎构建通过；否则检查 `build/tensorrt/libpvsa_tensorrt_plugins.so` 是否已编译、是否与插件节点属性一致。
+若未执行 7.2，把 `FULL_ONNX` 换成未简化的 `work_dirs/pvsa_full_256.onnx` 即可。
 
-### 10.3 完整 TensorRT 引擎测速
+### 7.4 完整 TensorRT 引擎测速
 
-普通 TensorRT 推理：
+普通推理：
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 \
@@ -330,7 +218,7 @@ CUDA_VISIBLE_DEVICES=1 \
   --useSpinWait
 ```
 
-完整 TensorRT CUDA Graph 推理：
+CUDA Graph 推理：
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 \
@@ -343,33 +231,3 @@ CUDA_VISIBLE_DEVICES=1 \
   --useCudaGraph \
   --useSpinWait
 ```
-
-确认日志包含：
-
-```text
-Plugins: .../libpvsa_tensorrt_plugins.so
-CUDA Graph: Enabled
-&&&& PASSED TensorRT.trtexec
-```
-
-### 10.4 当前仓库状态
-
-```text
-tools/export_pvsa_onnx.py    完整 PVSA 固定形状 ONNX 导出（含自定义节点 symbolic）
-deploy/tensorrt/             两个 PVSA 插件的编译与冒烟引擎
-build/tensorrt/pvsa_build_plugin_engine
-```
-
-`pvsa_build_plugin_engine` 只构建插件冒烟引擎，不是完整 PVSA 网络引擎；完整网络引擎必须按 10.1 → 10.2 → 10.3 的顺序生成 `pvsa_full.onnx` 和 `pvsa_full.engine`。
-
-注意事项：
-
-```text
-- 插件目前只支持 FP32，H、W 必须能被 7 整除（auto_pad 自动补齐）。
-- qk_dim == dim，num_heads 支持 2、4、8、16，head_dim 固定 32。
-- 导出的自定义节点属性必须与插件字段一致（topk/p/temperature/energy/scale/
-  full_route 与 num_heads/qk_dim/dim/n_win/height/width/scale/use_route_weight）。
-- 当前 ONNX 为固定形状，若后续需要动态 batch，需给插件补动态输入支持。
-```
-
-PyTorch 完整框架测速属于算法性能测试，应使用 `FPS.md` 或 `tools/analysis_tools/benchmark.py`，不应作为 TensorRT 部署流程。
