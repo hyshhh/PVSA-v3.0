@@ -46,7 +46,7 @@ def main():
                          '再重新运行。')
 
     import onnx
-    from onnx import helper
+    from onnx import helper, shape_inference, TensorProto
     model = onnx.load(args.onnx)
     cnt = Counter(n.op_type for n in model.graph.node)
     print('简化前节点数:', sum(cnt.values()))
@@ -63,6 +63,51 @@ def main():
             node.domain = custom_domain
     if custom_domain not in {o.domain for o in model.opset_import}:
         model.opset_import.append(helper.make_opsetid(custom_domain, 1))
+
+    # 关键：onnxsim 无法推断自定义节点的输出形状，导致其后的 Shape/Gather
+    # 链全部推不出静态形状、无法折叠。这里先用 onnx 符号推断把标准算子链
+    # 的形状算出来，再手动给自定义节点填充输出形状，最后重新推断让全图
+    # 静态化，onnxsim 才能折叠这些动态形状辅助算子。
+    model = shape_inference.infer_shapes(model)
+
+    vi = {v.name: v for v in list(model.graph.input)
+          + list(model.graph.value_info)}
+    for node in model.graph.node:
+        if node.op_type == 'PVSA_TopP_Route':
+            topk = 49
+            for a in node.attribute:
+                if a.name == 'topk':
+                    topk = a.i
+            in_vi = vi.get(node.input[0])
+            if in_vi is None:
+                continue
+            tt = in_vi.type.tensor_type
+            dims = ([d.dim_value for d in tt.shape.dim]
+                    if tt.HasField('shape') else [])
+            if len(dims) < 1 or any(d <= 0 for d in dims):
+                continue
+            n_p2 = dims[0]
+            for name, shp, et in zip(
+                    node.output,
+                    ([n_p2, topk], [n_p2, topk], [n_p2]),
+                    (TensorProto.FLOAT, TensorProto.INT32,
+                     TensorProto.INT32)):
+                model.graph.value_info.append(
+                    helper.make_tensor_value_info(name, et, shp))
+        elif node.op_type == 'PVSA_TopP_Flash':
+            in_vi = vi.get(node.input[0])
+            if in_vi is None:
+                continue
+            tt = in_vi.type.tensor_type
+            dims = ([d.dim_value for d in tt.shape.dim]
+                    if tt.HasField('shape') else [])
+            if not dims or any(d <= 0 for d in dims):
+                continue
+            model.graph.value_info.append(
+                helper.make_tensor_value_info(
+                    node.output[0], TensorProto.FLOAT, dims))
+
+    model = shape_inference.infer_shapes(model)
 
     if args.output is None:
         root, ext = os.path.splitext(args.onnx)
