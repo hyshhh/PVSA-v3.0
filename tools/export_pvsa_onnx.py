@@ -37,19 +37,24 @@ from mmseg.utils import register_all_modules
 
 # ============================================================
 # 1) ONNX symbolic 映射
+
+# 原始 CUDA 算子函数（全局引用，避免闭包在 TorchScript tracing 中失效）
+_ORIGINAL_ROUTE = None
+_ORIGINAL_FLASH = None
 #    top_p_bra 推理时调用 topp_route_cuda / topp_flash_attention，
 #    这里把它们替换成带 symbolic 的导出版本，仅导出时启用。
 # ============================================================
 
 def _patch_symbolic_export():
+    global _ORIGINAL_ROUTE, _ORIGINAL_FLASH
     import mmseg.models.utils.top_p_bra as _tpb
-    original_flash = _tpb.topp_flash_attention
-
+    _ORIGINAL_ROUTE = _tpb.topp_route_cuda
+    _ORIGINAL_FLASH = _tpb.topp_flash_attention
     class PVSARouteExport(torch.autograd.Function):
         @staticmethod
         def forward(ctx, query, key, topk, p, temperature, energy, scale,
                     full_route):
-            r_weight, r_idx, keep_len = original_route(
+            r_weight, r_idx, keep_len = _ORIGINAL_ROUTE(
                 query=query,
                 key=key,
                 topk=int(topk),
@@ -81,7 +86,7 @@ def _patch_symbolic_export():
         def forward(ctx, q_pix, kv_pix, r_weight, r_idx, keep_len, num_heads,
                     qk_dim, dim, scale, n_win, height, width,
                     use_route_weight):
-            out = original_flash(
+            out = _ORIGINAL_FLASH(
                 q_pix=q_pix,
                 kv_pix=kv_pix,
                 r_weight=r_weight,
@@ -265,6 +270,11 @@ def main():
     wrapper.eval()
 
     dummy_input = torch.randn(input_shape, device='cuda')
+
+    # 预热一次 forward：触发 optimize_for_inference 完成 Conv+BN 融合，
+    # 避免 tracer 前后 state_dict 不一致（state_dict changed）报错。
+    with torch.no_grad():
+        _ = wrapper(dummy_input)
 
     os.makedirs(os.path.dirname(args.onnx) or '.', exist_ok=True)
     with torch.no_grad():
