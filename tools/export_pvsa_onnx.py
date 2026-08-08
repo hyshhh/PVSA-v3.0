@@ -160,6 +160,35 @@ class MMSegONNXWrapper(nn.Module):
         # 老版本 mmseg 的 forward_dummy 效果相同，这里统一用 _forward。
         return self.model._forward(x)
 
+
+def _setup_cuda_env():
+    """保证 torch.utils.cpp_extension 能找到有效的 nvcc / CUDA_HOME。
+
+    JIT 编译 PVSA CUDA 扩展时会用 CUDA_HOME/bin/nvcc，若 CUDA_HOME
+    指向不存在的目录（如 /usr/local/cuda-12.0）会直接报 nvcc not found。
+    这里自动解析真实可用的 nvcc 并覆盖 CUDA_HOME / CUDACXX。
+    """
+    import shutil
+    nvcc = shutil.which("nvcc")
+    if nvcc is None:
+        for cand in ("/usr/bin/nvcc", "/usr/local/cuda/bin/nvcc",
+                     "/usr/local/cuda-12.0/bin/nvcc",
+                     "/usr/local/cuda-11.8/bin/nvcc"):
+            if os.path.exists(cand):
+                nvcc = cand
+                break
+    if nvcc is None:
+        print("警告: 未找到 nvcc，请先安装 CUDA 工具链或设置 CUDA_HOME。")
+        return
+    real_nvcc = os.path.realpath(nvcc)
+    cuda_home = os.path.dirname(os.path.dirname(real_nvcc))
+    if os.path.exists(os.path.join(cuda_home, "bin", "nvcc")):
+        os.environ["CUDA_HOME"] = cuda_home
+        os.environ["CUDACXX"] = os.path.join(cuda_home, "bin", "nvcc")
+    else:
+        os.environ["CUDACXX"] = real_nvcc
+    os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "8.6")
+    print('CUDA_HOME=' + str(os.environ.get('CUDA_HOME')) + ', nvcc=' + str(os.environ.get('CUDACXX')))
 def main():
     parser = argparse.ArgumentParser(
         description='导出完整 PVSA 固定形状 ONNX（含自定义节点）')
@@ -178,6 +207,9 @@ def main():
     args = parser.parse_args()
 
     input_shape = tuple(args.input_size)
+
+    # 解析有效的 CUDA_HOME / nvcc，避免 JIT 编译扩展时找不到 nvcc
+    _setup_cuda_env()
 
     # 注册 mmseg 所有模块（SegDataPreProcessor 等）
     register_all_modules()
