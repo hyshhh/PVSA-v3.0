@@ -128,7 +128,7 @@ def _patch_symbolic_export():
 
     def export_flash(q_pix, kv_pix, r_weight, r_idx, r_mask=None,
                      num_heads=8, qk_dim=None, dim=None, scale=1.0, n_win=7,
-                     height=None, width=None, block_windows=64, backend=None,
+                     H=None, W=None, block_windows=64, backend=None,
                      debug=False, keep_len=None, use_route_weight=True):
         if keep_len is None:
             if r_mask is None:
@@ -137,7 +137,7 @@ def _patch_symbolic_export():
         return PVSAFlashExport.apply(
             q_pix, kv_pix, r_weight, r_idx, keep_len,
             int(num_heads), int(qk_dim), int(dim), float(scale),
-            int(n_win), int(height), int(width), bool(use_route_weight))
+            int(n_win), int(H), int(W), bool(use_route_weight))
 
     _tpb.topp_route_cuda = export_route
     _tpb.topp_flash_attention = export_flash
@@ -251,6 +251,10 @@ def main():
     else:
         print('未指定 checkpoint，使用随机初始化参数。')
     model.eval()
+    # 关键：ONNX tracing 时若参数 requires_grad=True，qkv 输出也会
+    # requires_grad=True，导致 can_run_topp_route_cuda 拒绝走 CUDA 路由，
+    # 从而导出结果缺少 PVSA_TopP_Route 节点。
+    model.requires_grad_(False)
 
     if not torch.cuda.is_available():
         raise RuntimeError('导出 PVSA 自定义节点需要 CUDA 与已编译的 PVSA '
@@ -263,15 +267,16 @@ def main():
     dummy_input = torch.randn(input_shape, device='cuda')
 
     os.makedirs(os.path.dirname(args.onnx) or '.', exist_ok=True)
-    torch.onnx.export(
-        wrapper,
-        dummy_input,
-        args.onnx,
-        input_names=['input'],
-        output_names=['logits'],
-        opset_version=args.opset,
-        do_constant_folding=True,
-    )
+    with torch.no_grad():
+        torch.onnx.export(
+            wrapper,
+            dummy_input,
+            args.onnx,
+            input_names=['input'],
+            output_names=['logits'],
+            opset_version=args.opset,
+            do_constant_folding=True,
+        )
 
     # 结构校验 + 确认自定义节点存在
     import onnx
