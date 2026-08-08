@@ -76,13 +76,23 @@ def main():
     )
     print(f'简化耗时: {time.time() - t0:.1f}s，验证通过: {check_ok}')
 
-    for node in model_sim.graph.node:
-        if (node.op_type in ('PVSA_TopP_Route', 'PVSA_TopP_Flash')
-                and node.domain == custom_domain):
-            node.domain = ''
-    model_sim.opset_import[:] = [
-        o for o in model_sim.opset_import if o.domain != custom_domain
-    ]
+    def _restore_domain(graph):
+        for node in graph.node:
+            if (node.op_type in ('PVSA_TopP_Route', 'PVSA_TopP_Flash')
+                    and node.domain == custom_domain):
+                node.domain = ''
+            # 递归处理子图（前馈网络一般没有，防御性保留）
+            for attr in node.attribute:
+                if attr.type == onnx.AttributeProto.GRAPH:
+                    _restore_domain(attr.g)
+
+    _restore_domain(model_sim.graph)
+    # repeated message 字段不支持切片赋值，先清空再逐个追加
+    keep_opset = [o for o in model_sim.opset_import
+                  if o.domain != custom_domain]
+    del model_sim.opset_import[:]
+    for o in keep_opset:
+        model_sim.opset_import.append(o)
 
     cnt_sim = Counter(n.op_type for n in model_sim.graph.node)
     print('简化后节点数:', sum(cnt_sim.values()))
