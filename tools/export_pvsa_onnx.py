@@ -149,15 +149,16 @@ def _patch_symbolic_export():
 # ============================================================
 
 class MMSegONNXWrapper(nn.Module):
-    """mmseg 部署专用包装：forward_dummy 只跑前向，不依赖数据样本。"""
+    """mmseg 部署专用包装：_forward 只跑网络前向，不依赖数据样本。"""
 
     def __init__(self, model):
         super().__init__()
         self.model = model
 
     def forward(self, x):
-        return self.model.forward_dummy(x)
-
+        # _forward 是 mmseg EncoderDecoder 的纯前向（返回 logits）；
+        # 老版本 mmseg 的 forward_dummy 效果相同，这里统一用 _forward。
+        return self.model._forward(x)
 
 def main():
     parser = argparse.ArgumentParser(
