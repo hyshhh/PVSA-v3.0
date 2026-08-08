@@ -253,24 +253,24 @@ PVSA_TopP_Flash
 
 仓库已提供导出脚本 `tools/export_pvsa_onnx.py`，它把 PyTorch 推理路径里的两个自定义 CUDA 算子（`topp_route_cuda` / `topp_flash_attention`）通过 ONNX symbolic 映射导出为同名插件节点。导出时需要 GPU 且 PVSA CUDA 扩展可用（即 `topp_flash_backend=cuda` 能正常推理），否则不会生成自定义节点。
 
-加载训练好的权重：
+默认不加载权重，模型随机初始化导出（`--checkpoint` 传 `0` 或省略均表示随机初始化）：
 
 ```bash
 export PYTHONPATH=$PWD:$PYTHONPATH
 
 python tools/export_pvsa_onnx.py \
   --config configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
-  --checkpoint work_dirs/PVSA/epoch_10.pth \
+  --checkpoint 0 \
   --onnx work_dirs/pvsa_full.onnx \
   --input-size 1 3 512 512
 ```
 
-不加载权重、随机初始化导出（用于无权重完整框架测速）：
+如需加载训练好的权重，把 `--checkpoint` 换成权重路径即可：
 
 ```bash
 python tools/export_pvsa_onnx.py \
   --config configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
-  --checkpoint 0 \
+  --checkpoint work_dirs/PVSA/epoch_10.pth \
   --onnx work_dirs/pvsa_full.onnx \
   --input-size 1 3 512 512
 ```
@@ -286,7 +286,6 @@ PVSA_TopP_Flash 节点数: ...
 ```
 
 固定输入尺寸的 ONNX 不需要额外设置动态形状；动态输入必须补充对应的形状配置。首次部署建议使用 FP32，验证数值一致性后再增加 `--fp16`。
-
 ### 10.2 构建完整 TensorRT 引擎
 
 ```bash
