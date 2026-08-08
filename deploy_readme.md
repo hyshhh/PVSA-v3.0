@@ -253,6 +253,8 @@ PVSA_TopP_Flash
 
 仓库已提供导出脚本 `tools/export_pvsa_onnx.py`，它把 PyTorch 推理路径里的两个自定义 CUDA 算子（`topp_route_cuda` / `topp_flash_attention`）通过 ONNX symbolic 映射导出为同名插件节点。导出时需要 GPU 且 PVSA CUDA 扩展可用（即 `topp_flash_backend=cuda` 能正常推理），否则不会生成自定义节点。
 
+加载训练好的权重：
+
 ```bash
 export PYTHONPATH=$PWD:$PYTHONPATH
 
@@ -262,6 +264,18 @@ python tools/export_pvsa_onnx.py \
   --onnx work_dirs/pvsa_full.onnx \
   --input-size 1 3 512 512
 ```
+
+不加载权重、随机初始化导出（用于无权重完整框架测速）：
+
+```bash
+python tools/export_pvsa_onnx.py \
+  --config configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+  --checkpoint 0 \
+  --onnx work_dirs/pvsa_full.onnx \
+  --input-size 1 3 512 512
+```
+
+`--checkpoint` 传 `0` 或省略时跳过 `load_checkpoint`，模型参数保持随机初始化。
 
 导出成功后日志会显示：
 

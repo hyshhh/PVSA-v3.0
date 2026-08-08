@@ -165,7 +165,9 @@ def main():
     parser.add_argument('--config', required=True,
                         help='模型配置文件路径，如 configs-h/biformer/'
                              'biformer_mm-20k_chase_db1-512x512.py')
-    parser.add_argument('--checkpoint', required=True, help='权重文件路径')
+    parser.add_argument('--checkpoint', nargs='?', default='0',
+                        help='权重文件路径；传 0 或省略时随机初始化参数'
+                             '（不加载权重）')
     parser.add_argument('--onnx', required=True, help='输出 ONNX 文件路径')
     parser.add_argument('--input-size', nargs=4, type=int,
                         default=[1, 3, 512, 512],
@@ -190,7 +192,11 @@ def main():
     cfg.merge_from_dict({'model.backbone.topp_flash_backend': 'cuda'})
 
     model = MODELS.build(cfg.model)
-    load_checkpoint(model, args.checkpoint, map_location='cpu')
+    if args.checkpoint not in (None, '0'):
+        load_checkpoint(model, args.checkpoint, map_location='cpu')
+        print(f'已加载权重: {args.checkpoint}')
+    else:
+        print('未指定 checkpoint，使用随机初始化参数。')
     model.eval()
 
     if not torch.cuda.is_available():
