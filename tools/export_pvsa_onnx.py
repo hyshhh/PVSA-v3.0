@@ -166,6 +166,12 @@ class MMSegONNXWrapper(nn.Module):
 
 
 def _setup_cuda_env():
+
+    # torch.onnx.export 与结构校验都需要 onnx 包
+    try:
+        import onnx  # noqa: F401
+    except ImportError:
+        raise SystemExit('缺少 onnx 包：请先执行 pip install onnx，再重新运行。')
     """保证 torch.utils.cpp_extension 使用有效的 CUDA_HOME / nvcc。
 
     torch 的 cpp_extension 在首次 import 时会缓存 CUDA_HOME（模块变量），
@@ -235,6 +241,12 @@ def main():
 
     # 解析有效的 CUDA_HOME / nvcc，避免 JIT 编译扩展时找不到 nvcc
     _setup_cuda_env()
+
+    # torch.onnx.export 与结构校验都需要 onnx 包
+    try:
+        import onnx  # noqa: F401
+    except ImportError:
+        raise SystemExit('缺少 onnx 包：请先执行 pip install onnx，再重新运行。')
 
     # 注册 mmseg 所有模块（SegDataPreProcessor 等）
     register_all_modules()
