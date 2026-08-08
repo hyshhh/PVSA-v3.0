@@ -233,12 +233,13 @@ deploy/tensorrt/tools/build_plugin_engine.cpp
 deploy/tensorrt/CMakeLists.txt
 ```
 
+
 ## 10. 完整 PVSA TensorRT 框架测速
 
 完整部署的正确流程是：
 
 ```text
-完整 PVSA 模型 -> 固定形状 ONNX -> TensorRT 完整引擎 -> trtexec 测速
+完整 PVSA 模型 -> 固定形状 ONNX（含 PVSA 自定义节点）-> TensorRT 完整引擎 -> trtexec 测速
 ```
 
 完整引擎需要包含主干、PVSA 模块、输出投影和解码头，并且 ONNX 中的 PVSA 自定义节点必须映射到：
@@ -248,9 +249,31 @@ PVSA_TopP_Route
 PVSA_TopP_Flash
 ```
 
-### 10.1 构建完整 TensorRT 引擎
+### 10.1 导出完整 ONNX
 
-以下命令以已经生成的完整模型文件为例：
+仓库已提供导出脚本 `tools/export_pvsa_onnx.py`，它把 PyTorch 推理路径里的两个自定义 CUDA 算子（`topp_route_cuda` / `topp_flash_attention`）通过 ONNX symbolic 映射导出为同名插件节点。导出时需要 GPU 且 PVSA CUDA 扩展可用（即 `topp_flash_backend=cuda` 能正常推理），否则不会生成自定义节点。
+
+```bash
+export PYTHONPATH=$PWD:$PYTHONPATH
+
+python tools/export_pvsa_onnx.py \
+  --config configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+  --checkpoint work_dirs/PVSA/epoch_10.pth \
+  --onnx work_dirs/pvsa_full.onnx \
+  --input-size 1 3 512 512
+```
+
+导出成功后日志会显示：
+
+```text
+ONNX 结构校验通过: work_dirs/pvsa_full.onnx
+PVSA_TopP_Route 节点数: ...
+PVSA_TopP_Flash 节点数: ...
+```
+
+固定输入尺寸的 ONNX 不需要额外设置动态形状；动态输入必须补充对应的形状配置。首次部署建议使用 FP32，验证数值一致性后再增加 `--fp16`。
+
+### 10.2 构建完整 TensorRT 引擎
 
 ```bash
 export FULL_ONNX=work_dirs/pvsa_full.onnx
@@ -264,10 +287,9 @@ CUDA_VISIBLE_DEVICES=1 \
   --verbose
 ```
 
-固定输入尺寸的 ONNX 不需要额外设置动态形状；动态输入则必须补充对应的形状配置。
-首次部署建议使用 FP32，验证数值一致性后再增加 `--fp16`。
+确认日志包含插件加载成功且引擎构建通过；否则检查 `build/tensorrt/libpvsa_tensorrt_plugins.so` 是否已编译、是否与插件节点属性一致。
 
-### 10.2 完整 TensorRT 引擎测速
+### 10.3 完整 TensorRT 引擎测速
 
 普通 TensorRT 推理：
 
@@ -304,13 +326,24 @@ CUDA Graph: Enabled
 &&&& PASSED TensorRT.trtexec
 ```
 
-### 10.3 当前仓库状态
+### 10.4 当前仓库状态
 
 ```text
+tools/export_pvsa_onnx.py    完整 PVSA 固定形状 ONNX 导出（含自定义节点 symbolic）
+deploy/tensorrt/             两个 PVSA 插件的编译与冒烟引擎
 build/tensorrt/pvsa_build_plugin_engine
 ```
 
-目前只构建 PVSA 插件冒烟引擎，不是完整 PVSA 网络引擎。
-完整 ONNX 导出和完整网络 TensorRT 构建入口尚未集成到当前仓库，因此 `pvsa_full.onnx` 和 `pvsa_full.engine` 是完整网络转换完成后的文件名示例，不能用插件冒烟引擎代替。
+`pvsa_build_plugin_engine` 只构建插件冒烟引擎，不是完整 PVSA 网络引擎；完整网络引擎必须按 10.1 → 10.2 → 10.3 的顺序生成 `pvsa_full.onnx` 和 `pvsa_full.engine`。
+
+注意事项：
+
+```text
+- 插件目前只支持 FP32，H、W 必须能被 7 整除（auto_pad 自动补齐）。
+- qk_dim == dim，num_heads 支持 2、4、8、16，head_dim 固定 32。
+- 导出的自定义节点属性必须与插件字段一致（topk/p/temperature/energy/scale/
+  full_route 与 num_heads/qk_dim/dim/n_win/height/width/scale/use_route_weight）。
+- 当前 ONNX 为固定形状，若后续需要动态 batch，需给插件补动态输入支持。
+```
 
 PyTorch 完整框架测速属于算法性能测试，应使用 `FPS.md` 或 `tools/analysis_tools/benchmark.py`，不应作为 TensorRT 部署流程。
